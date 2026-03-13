@@ -13,7 +13,7 @@ const PRESETS = [
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-const CropCanvas = memo(({ imgFile, aspectW, aspectH, onCropChange }) => {
+const CropCanvas = memo(({ imgFile, aspectW, aspectH, desiredCropSize, onCropChange }) => {
   const canvasRef = useRef(null);
   const imgRef    = useRef(null);
   const S         = useRef({ dragging:false, resizing:false, handle:null, sx:0, sy:0, sc:null, crop:null, scale:1 });
@@ -34,8 +34,9 @@ const CropCanvas = memo(({ imgFile, aspectW, aspectH, onCropChange }) => {
     if (aspectW && aspectH) {
       const ratio = aspectW / aspectH;
       const cw = canvas.width, ch = canvas.height;
-      let nw = Math.min(crop.w, cw), nh = nw / ratio;
+      let nw = crop.w, nh = nw / ratio;
       if (nh > ch) { nh = ch; nw = nh * ratio; }
+      if (nw > cw) { nw = cw; nh = nw / ratio; }
       S.current.crop = { x: clamp(crop.x, 0, cw - nw), y: clamp(crop.y, 0, ch - nh), w: nw, h: nh };
     }
     draw(); reportCrop();
@@ -52,12 +53,24 @@ const CropCanvas = memo(({ imgFile, aspectW, aspectH, onCropChange }) => {
     canvas.width  = Math.round(img.naturalWidth  * sc);
     canvas.height = Math.round(img.naturalHeight * sc);
     const cw = canvas.width, ch = canvas.height;
+
     let cW, cH;
-    if (aspectW && aspectH) {
+
+    if (desiredCropSize) {
+      // Use exact typed output size (in original pixels) as starting crop
+      cW = desiredCropSize.w * sc;
+      cH = desiredCropSize.h * sc;
+      if (cW > cw * 0.92) { cH *= (cw * 0.92 / cW); cW = cw * 0.92; }
+      if (cH > ch * 0.92) { cW *= (ch * 0.92 / cH); cH = ch * 0.92; }
+    } else if (aspectW && aspectH) {
       const r = aspectW / aspectH;
-      cW = Math.min(cw, ch * r); cH = cW / r;
-      if (cH > ch) { cH = ch; cW = cH * r; }
-    } else { cW = cw * 0.85; cH = ch * 0.85; }
+      cW = Math.min(cw * 0.85, ch * 0.85 * r);
+      cH = cW / r;
+      if (cH > ch * 0.85) { cH = ch * 0.85; cW = cH * r; }
+    } else {
+      cW = cw * 0.85; cH = ch * 0.85;
+    }
+
     S.current.crop = { x: (cw - cW) / 2, y: (ch - cH) / 2, w: cW, h: cH };
     draw(); reportCrop();
   }
@@ -258,6 +271,7 @@ export default function CropKit() {
   const [pendingW,     setPendingW]     = useState("512");
   const [pendingH,     setPendingH]     = useState("512");
   const [sizeKey,      setSizeKey]      = useState(0);
+  const [desiredCropSize, setDesiredCropSize] = useState(null);
   const [outputExt,    setOutputExt]    = useState("png");
   const [quality,      setQuality]      = useState(92);
   const [crops,        setCrops]        = useState({});
@@ -277,7 +291,6 @@ export default function CropKit() {
 
   const outW    = parseInt(customW) || 512;
   const outH    = parseInt(customH) || 512;
-  // Output size ALWAYS controls the crop aspect ratio — presets just set convenient W/H values
   const aspectW = outW;
   const aspectH = outH;
   const IMAGE_EXTS = /\.(jpe?g|png|webp|gif|bmp|avif|tiff?)$/i;
@@ -344,7 +357,6 @@ export default function CropKit() {
   async function renderCanvas(imgObj, cropData) {
     const el = new window.Image();
     await new Promise(r => { el.onload = r; el.src = imgObj.url; });
-    // Export exactly what the user sees — actual crop dimensions, no scaling
     const tw = cropData ? Math.round(cropData.w) : el.naturalWidth;
     const th = cropData ? Math.round(cropData.h) : el.naturalHeight;
     const canvas = document.createElement("canvas");
@@ -548,13 +560,18 @@ export default function CropKit() {
               </div>
               {/* canvas fill */}
               <div style={{ flex:1, overflow:"hidden", padding:14 }}>
-                <CropCanvas key={`${activeIdx}_${activeImage.url}_${preset?.label||"custom"}_${sizeKey}`}
-                  imgFile={activeImage} aspectW={aspectW} aspectH={aspectH}
+                <CropCanvas 
+                  key={`${activeIdx}_${activeImage.url}_${sizeKey}`}
+                  imgFile={activeImage} 
+                  aspectW={aspectW} 
+                  aspectH={aspectH}
+                  desiredCropSize={desiredCropSize}
                   onCropChange={c=>{
                     setCrops(p=>({...p,[activeIdx]:c}));
                     setPendingW(String(Math.round(c.w)));
                     setPendingH(String(Math.round(c.h)));
-                  }}/>
+                  }}
+                />
               </div>
               {crops[activeIdx] && (
                 <div style={{ padding:"5px 14px 8px", fontSize:9, color:"var(--text4)", textAlign:"center",
@@ -585,6 +602,7 @@ export default function CropKit() {
                       const newW = String(Math.max(1, Math.round(h * ratio)));
                       setCustomW(newW); setPendingW(newW);
                       setCustomH(String(h)); setPendingH(String(h));
+                      setDesiredCropSize(null);
                       setSizeKey(k=>k+1);
                     }}>{p.label}</button>
                 ))}
@@ -599,11 +617,11 @@ export default function CropKit() {
               <div style={{ display:"flex", gap:8, alignItems:"center" }}>
                 <input className="inp inp-sm" type="number" min="1" value={pendingW}
                   onChange={e=>setPendingW(e.target.value)}
-                  onKeyDown={e=>{ if(e.key==="Enter"){ const w=Math.max(1,parseInt(pendingW)||512); const h=Math.max(1,parseInt(pendingH)||512); setPreset(null); setCustomW(String(w)); setCustomH(String(h)); setPendingW(String(w)); setPendingH(String(h)); setSizeKey(k=>k+1); }}}/>
+                  onKeyDown={e=>{ if(e.key==="Enter"){ const w=Math.max(1,parseInt(pendingW)||512); const h=Math.max(1,parseInt(pendingH)||512); setPreset(null); setCustomW(String(w)); setCustomH(String(h)); setPendingW(String(w)); setPendingH(String(h)); setDesiredCropSize({w,h}); setSizeKey(k=>k+1); }}}/>
                 <span style={{ color:"var(--text5)",fontSize:14,fontWeight:300 }}>×</span>
                 <input className="inp inp-sm" type="number" min="1" value={pendingH}
                   onChange={e=>setPendingH(e.target.value)}
-                  onKeyDown={e=>{ if(e.key==="Enter"){ const w=Math.max(1,parseInt(pendingW)||512); const h=Math.max(1,parseInt(pendingH)||512); setPreset(null); setCustomW(String(w)); setCustomH(String(h)); setPendingW(String(w)); setPendingH(String(h)); setSizeKey(k=>k+1); }}}/>
+                  onKeyDown={e=>{ if(e.key==="Enter"){ const w=Math.max(1,parseInt(pendingW)||512); const h=Math.max(1,parseInt(pendingH)||512); setPreset(null); setCustomW(String(w)); setCustomH(String(h)); setPendingW(String(w)); setPendingH(String(h)); setDesiredCropSize({w,h}); setSizeKey(k=>k+1); }}}/>
               </div>
               <button className="btn-main" style={{ width:"100%", marginTop:8, padding:"7px 12px", fontSize:11 }}
                 onClick={()=>{
@@ -612,11 +630,12 @@ export default function CropKit() {
                   setPreset(null);
                   setCustomW(String(w)); setCustomH(String(h));
                   setPendingW(String(w)); setPendingH(String(h));
+                  setDesiredCropSize({ w, h });
                   setSizeKey(k=>k+1);
                 }}>
                 Lock ratio &amp; reset crop
               </button>
-              <div style={{ fontSize:9, color:"var(--text5)", marginTop:5 }}>type a size → lock ratio → drag freely within it</div>
+              <div style={{ fontSize:9, color:"var(--text5)", marginTop:5 }}>type size → lock ratio → drag freely</div>
             </div>
 
             <div className="divider"/>
@@ -689,7 +708,6 @@ export default function CropKit() {
             </div>
 
           </div>
-
           <div style={{ height:16, flexShrink:0 }}/>
         </div>
       </div>
