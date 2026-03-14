@@ -11,9 +11,21 @@ const PRESETS = [
   { label: "2:3",   w: 2,  h: 3  },
 ];
 
+const DEFAULT_IMG_SETTINGS = {
+  preset: null,
+  customW: "512",
+  customH: "512",
+  pendingW: "512",
+  pendingH: "512",
+  outputExt: "png",
+  quality: 92,
+  desiredCropSize: null,
+  sizeKey: 0,
+};
+
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-const CropCanvas = memo(({ imgFile, aspectW, aspectH, desiredCropSize, onCropChange }) => {
+const CropCanvas = memo(({ imgFile, aspectW, aspectH, desiredCropSize, savedCrop, lockRatio, onCropChange }) => {
   const canvasRef = useRef(null);
   const imgRef    = useRef(null);
   const S         = useRef({ dragging:false, resizing:false, handle:null, sx:0, sy:0, sc:null, crop:null, scale:1 });
@@ -31,7 +43,7 @@ const CropCanvas = memo(({ imgFile, aspectW, aspectH, desiredCropSize, onCropCha
     const { crop } = S.current;
     if (!crop) return;
     const canvas = canvasRef.current;
-    if (aspectW && aspectH) {
+    if (lockRatio && aspectW && aspectH) {
       const ratio = aspectW / aspectH;
       const cw = canvas.width, ch = canvas.height;
       let nw = crop.w, nh = nw / ratio;
@@ -53,25 +65,37 @@ const CropCanvas = memo(({ imgFile, aspectW, aspectH, desiredCropSize, onCropCha
     canvas.width  = Math.round(img.naturalWidth  * sc);
     canvas.height = Math.round(img.naturalHeight * sc);
     const cw = canvas.width, ch = canvas.height;
+    let cW, cH, cx, cy;
 
-    let cW, cH;
-
-    if (desiredCropSize) {
-      // Use exact typed output size (in original pixels) as starting crop
-      cW = desiredCropSize.w * sc;
-      cH = desiredCropSize.h * sc;
+    if (savedCrop) {
+      // Restore previously saved crop (stored in original px), convert to canvas px
+      cW = clamp(savedCrop.w * sc, 10, cw);
+      cH = clamp(savedCrop.h * sc, 10, ch);
+      cx = clamp(savedCrop.x * sc, 0, cw - cW);
+      cy = clamp(savedCrop.y * sc, 0, ch - cH);
+    } else if (desiredCropSize) {
+      cW = Math.min(desiredCropSize.w * sc, cw);
+      cH = Math.min(desiredCropSize.h * sc, ch);
       if (cW > cw * 0.92) { cH *= (cw * 0.92 / cW); cW = cw * 0.92; }
       if (cH > ch * 0.92) { cW *= (ch * 0.92 / cH); cH = ch * 0.92; }
-    } else if (aspectW && aspectH) {
+      cx = (cw - cW) / 2; cy = (ch - cH) / 2;
+    } else if (lockRatio && aspectW && aspectH) {
       const r = aspectW / aspectH;
       cW = Math.min(cw * 0.85, ch * 0.85 * r);
       cH = cW / r;
       if (cH > ch * 0.85) { cH = ch * 0.85; cW = cH * r; }
+      cx = (cw - cW) / 2; cy = (ch - cH) / 2;
     } else {
       cW = cw * 0.85; cH = ch * 0.85;
+      cx = (cw - cW) / 2; cy = (ch - cH) / 2;
     }
 
-    S.current.crop = { x: (cw - cW) / 2, y: (ch - cH) / 2, w: cW, h: cH };
+    // Hard clamp — crop must never exceed canvas
+    cW = clamp(cW, 10, cw);
+    cH = clamp(cH, 10, ch);
+    cx = clamp(cx, 0, cw - cW);
+    cy = clamp(cy, 0, ch - cH);
+    S.current.crop = { x: cx, y: cy, w: cW, h: cH };
     draw(); reportCrop();
   }
 
@@ -145,14 +169,15 @@ const CropCanvas = memo(({ imgFile, aspectW, aspectH, desiredCropSize, onCropCha
       s.crop = { x: clamp(sc.x+dx, 0, cw-sc.w), y: clamp(sc.y+dy, 0, ch-sc.h), w: sc.w, h: sc.h };
     } else {
       let { x:nx, y:ny, w:nw, h:nh } = sc;
-      const ratio = (aspectW && aspectH) ? aspectW/aspectH : 0;
+      const ratio = (lockRatio && aspectW && aspectH) ? aspectW/aspectH : 0;
       const hid = s.handle;
       if (hid.includes("r")) nw = clamp(sc.w+dx, 20, cw-sc.x);
       if (hid.includes("l")) { nw = clamp(sc.w-dx, 20, sc.x+sc.w); nx = sc.x+sc.w-nw; }
       if (hid.includes("b")) nh = clamp(sc.h+dy, 20, ch-sc.y);
       if (hid.includes("t")) { nh = clamp(sc.h-dy, 20, sc.y+sc.h); ny = sc.y+sc.h-nh; }
       if (ratio) { if (hid==="tc"||hid==="bc") nw=nh*ratio; else { nh=nw/ratio; if (hid.includes("t")) ny=sc.y+sc.h-nh; } }
-      s.crop = { x: clamp(nx,0,cw-10), y: clamp(ny,0,ch-10), w: Math.max(10,nw), h: Math.max(10,nh) };
+      nw = clamp(nw, 10, cw); nh = clamp(nh, 10, ch);
+      s.crop = { x: clamp(nx,0,cw-nw), y: clamp(ny,0,ch-nh), w: nw, h: nh };
     }
     if (raf.current) cancelAnimationFrame(raf.current);
     raf.current = requestAnimationFrame(() => { draw(); reportCrop(); });
@@ -233,23 +258,6 @@ function RenameModal({ count, initialConfig, onClose, onApply }) {
   );
 }
 
-function FolderModal({ onClose, onConfirm }) {
-  return (
-    <div style={{ position:"fixed",inset:0,background:"rgba(0,0,0,.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:16 }}>
-      <div style={{ background:"var(--surface)",border:"1px solid var(--border)",borderRadius:14,padding:28,width:360,maxWidth:"100%",boxShadow:"0 8px 32px rgba(0,0,0,.2)" }}>
-        <div style={{ fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,marginBottom:8,color:"var(--text)" }}>Include subfolders?</div>
-        <div style={{ fontSize:13,color:"var(--text3)",marginBottom:22,lineHeight:1.8 }}>
-          Your folder contains subfolders.<br/>Folder structure will be preserved inside the ZIP output.
-        </div>
-        <div style={{ display:"flex",gap:10 }}>
-          <button className="btn-ghost" style={{ flex:1 }} onClick={()=>onConfirm(false)}>Top folder only</button>
-          <button className="btn-main" style={{ flex:1 }} onClick={()=>onConfirm(true)}>Include subfolders</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function Logo({ size = 26 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 26 26" fill="none">
@@ -262,56 +270,94 @@ function Logo({ size = 26 }) {
   );
 }
 
+function Toast({ msg, onDone }) {
+  useEffect(() => { const t = setTimeout(onDone, 2200); return () => clearTimeout(t); }, []);
+  return (
+    <div style={{ position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",
+      background:"#FF3333",color:"#fff",borderRadius:8,padding:"9px 18px",
+      fontSize:12,fontFamily:"'DM Mono',monospace",zIndex:500,
+      boxShadow:"0 4px 16px rgba(0,0,0,.28)",pointerEvents:"none",whiteSpace:"nowrap" }}>
+      ✓ {msg}
+    </div>
+  );
+}
+
 export default function CropKit() {
-  const [images,       setImages]       = useState([]);
-  const [activeIdx,    setActiveIdx]    = useState(0);
-  const [preset,       setPreset]       = useState(null);
-  const [customW,      setCustomW]      = useState("512");
-  const [customH,      setCustomH]      = useState("512");
-  const [pendingW,     setPendingW]     = useState("512");
-  const [pendingH,     setPendingH]     = useState("512");
-  const [sizeKey,      setSizeKey]      = useState(0);
-  const [desiredCropSize, setDesiredCropSize] = useState(null);
-  const [outputExt,    setOutputExt]    = useState("png");
-  const [quality,      setQuality]      = useState(92);
-  const [crops,        setCrops]        = useState({});
-  const [processing,   setProcessing]   = useState(false);
-  const [progress,     setProgress]     = useState(0);
-  const [progressLabel,setProgressLabel]= useState("");
-  const [done,         setDone]         = useState(false);
-  const [dlMode,       setDlMode]       = useState("zip");
-  const [showRename,   setShowRename]   = useState(false);
-  const [renameConfig, setRenameConfig] = useState(null);
-  const [pickOpen,     setPickOpen]     = useState(false);
-  const [darkMode,     setDarkMode]     = useState(true);
+  const [images,        setImages]        = useState([]);
+  const [activeIdx,     setActiveIdx]     = useState(0);
+  const [imageSettings, setImageSettings] = useState({});
+  const [crops,         setCrops]         = useState({});
+  const [processing,    setProcessing]    = useState(false);
+  const [progress,      setProgress]      = useState(0);
+  const [progressLabel, setProgressLabel] = useState("");
+  const [done,          setDone]          = useState(false);
+  const [dlMode,        setDlMode]        = useState("zip");
+  const [showRename,    setShowRename]    = useState(false);
+  const [renameConfig,  setRenameConfig]  = useState(null);
+  const [pickOpen,      setPickOpen]      = useState(false);
+  const [darkMode,      setDarkMode]      = useState(true);
+  const [toastMsg,      setToastMsg]      = useState("");
 
   const fileRef   = useRef(null);
   const folderRef = useRef(null);
   const dropRef   = useRef(null);
-
-  const outW    = parseInt(customW) || 512;
-  const outH    = parseInt(customH) || 512;
-  const aspectW = outW;
-  const aspectH = outH;
   const IMAGE_EXTS = /\.(jpe?g|png|webp|gif|bmp|avif|tiff?)$/i;
 
+  // ── Per-image settings helpers ───────────────────────────────────────────────
+  function getSettings(idx) {
+    return { ...DEFAULT_IMG_SETTINGS, ...(imageSettings[idx] || {}) };
+  }
+  function updateSettings(idx, updates) {
+    setImageSettings(prev => ({
+      ...prev,
+      [idx]: { ...DEFAULT_IMG_SETTINGS, ...(prev[idx] || {}), ...updates },
+    }));
+  }
+  function copySettingsToAll() {
+    if (images.length < 2) return;
+    const src      = getSettings(activeIdx);
+    const srcCrop  = crops[activeIdx] || null;
+
+    // Copy settings to every image, bump sizeKey so each canvas remounts
+    setImageSettings(prev => {
+      const next = {};
+      images.forEach((_, i) => {
+        next[i] = { ...src, sizeKey: ((prev[i]?.sizeKey) || 0) + 1 };
+      });
+      return next;
+    });
+
+    // Copy the exact crop to every image so savedCrop restores it
+    // (initCanvas will clamp it to each image's own bounds automatically)
+    setCrops(prev => {
+      const next = {};
+      images.forEach((_, i) => {
+        next[i] = srcCrop;
+      });
+      return next;
+    });
+
+    setToastMsg(`Settings + crop copied to all ${images.length} images`);
+  }
+
+  // Active image settings shorthand
+  const S = getSettings(activeIdx);
+  const aspectW = parseInt(S.customW) || 512;
+  const aspectH = parseInt(S.customH) || 512;
+  const lockRatio = !!(S.preset || S.desiredCropSize);
+
   function loadFiles(rawFiles) {
-    const arr = [...rawFiles].filter(f =>
-      f.type.startsWith("image/") || IMAGE_EXTS.test(f.name)
-    );
+    const arr = [...rawFiles].filter(f => f.type.startsWith("image/") || IMAGE_EXTS.test(f.name));
     if (!arr.length) return;
     const collected = arr.map(f => ({
-      url: URL.createObjectURL(f),
-      name: f.name,
-      file: f,
-      w: 0,
-      h: 0,
+      url: URL.createObjectURL(f), name: f.name, file: f, w: 0, h: 0,
       relativePath: f.webkitRelativePath || f.name,
     }));
     collected.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
     setImages(prev => [...prev, ...collected]);
     setActiveIdx(0);
     setCrops({});
+    setImageSettings({});
     setDone(false);
   }
 
@@ -331,6 +377,11 @@ export default function CropKit() {
   function removeImg(i) {
     setImages(p => p.filter((_, idx) => idx !== i));
     setCrops(p => {
+      const n = {};
+      Object.entries(p).forEach(([k, v]) => { const ki = +k; if (ki < i) n[ki] = v; else if (ki > i) n[ki-1] = v; });
+      return n;
+    });
+    setImageSettings(p => {
       const n = {};
       Object.entries(p).forEach(([k, v]) => { const ki = +k; if (ki < i) n[ki] = v; else if (ki > i) n[ki-1] = v; });
       return n;
@@ -369,17 +420,17 @@ export default function CropKit() {
 
   async function downloadAll() {
     setProcessing(true); setProgress(0); setDone(false);
-    const mime = outputExt==="png" ? "image/png" : outputExt==="webp" ? "image/webp" : outputExt==="avif" ? "image/avif" : "image/jpeg";
-    const q    = (outputExt==="png"||outputExt==="avif") ? 1 : quality/100;
-
     if (dlMode === "zip") {
       const zip = new JSZip();
       for (let i = 0; i < images.length; i++) {
         setProgressLabel(`Rendering ${i+1} / ${images.length}`);
         const img    = images[i];
+        const imgS   = getSettings(i);
+        const mime   = imgS.outputExt==="png"?"image/png":imgS.outputExt==="webp"?"image/webp":imgS.outputExt==="avif"?"image/avif":"image/jpeg";
+        const q      = (imgS.outputExt==="png"||imgS.outputExt==="avif") ? 1 : imgS.quality/100;
         const canvas = await renderCanvas(img, crops[i]);
         const blob   = await new Promise(r => canvas.toBlob(r, mime, q));
-        const fname  = buildName(img.name, i, renameConfig, outputExt);
+        const fname  = buildName(img.name, i, renameConfig, imgS.outputExt);
         const parts  = img.relativePath.split("/");
         const folder = parts.length > 1 ? parts.slice(0,-1).join("/") : "";
         folder ? zip.folder(folder).file(fname, blob) : zip.file(fname, blob);
@@ -394,10 +445,13 @@ export default function CropKit() {
     } else {
       for (let i = 0; i < images.length; i++) {
         setProgressLabel(`Downloading ${i+1} / ${images.length}`);
+        const imgS   = getSettings(i);
+        const mime   = imgS.outputExt==="png"?"image/png":imgS.outputExt==="webp"?"image/webp":imgS.outputExt==="avif"?"image/avif":"image/jpeg";
+        const q      = (imgS.outputExt==="png"||imgS.outputExt==="avif") ? 1 : imgS.quality/100;
         const canvas = await renderCanvas(images[i], crops[i]);
         await new Promise(r => canvas.toBlob(blob => {
           const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-          a.download = buildName(images[i].name, i, renameConfig, outputExt); a.click();
+          a.download = buildName(images[i].name, i, renameConfig, imgS.outputExt); a.click();
           setTimeout(r, 200);
         }, mime, q));
         setProgress(Math.round((i+1)/images.length*100));
@@ -447,6 +501,12 @@ export default function CropKit() {
         .btn-ghost:hover{border-color:var(--text3);color:var(--text)}
         .btn-ghost:disabled{opacity:.35;cursor:not-allowed}
 
+        .btn-copy-all{background:var(--surface);color:var(--text3);border:1.5px solid var(--border2);border-radius:8px;
+          padding:5px 11px;font-size:10px;cursor:pointer;font-family:inherit;transition:all .12s;
+          display:flex;align-items:center;gap:5px;white-space:nowrap;letter-spacing:.03em;height:32px}
+        .btn-copy-all:hover:not(:disabled){border-color:#FF3333;color:#FF3333}
+        .btn-copy-all:disabled{opacity:.28;cursor:not-allowed}
+
         .seg{display:flex;gap:2px;background:var(--bg);border:1.5px solid var(--border);border-radius:7px;padding:3px}
         .seg button{flex:1;padding:5px 7px;border:none;border-radius:5px;font-size:11px;
           cursor:pointer;font-family:inherit;background:transparent;color:var(--text3);transition:all .12s;white-space:nowrap}
@@ -485,12 +545,24 @@ export default function CropKit() {
         display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0, gap:10 }}>
         <div className="header-title" style={{ display:"flex", alignItems:"center", gap:10 }}>
           <Logo size={26}/>
-          <span style={{ fontFamily:"'Syne',sans-serif", fontSize:17, fontWeight:900, letterSpacing:"-.02em", color:"var(--text)" }}>CROPKIT</span>
-          <span className="subtitle" style={{ fontSize:9, color:"var(--text5)", letterSpacing:".12em" }}>BATCH IMAGE STUDIO</span>
+          <span style={{ fontFamily:"'Syne',sans-serif", fontSize:17, fontWeight:900, letterSpacing:"-.02em", color:"var(--text)" }}>CropKit</span>
+          <span style={{ fontSize:13, color:"var(--text4)", fontWeight:300, margin:"0 2px" }}>·</span>
+          <span className="subtitle" style={{ fontSize:11, color:"var(--text4)", letterSpacing:".04em" }}>Batch Image Studio</span>
         </div>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           {images.length > 0 &&
             <span style={{ fontSize:10, color:"var(--text4)" }}>{images.length} images loaded</span>}
+          <button
+            className="btn-copy-all"
+            disabled={images.length < 2}
+            onClick={copySettingsToAll}
+            title="Copy current image settings (ratio, size, format, quality) to ALL images">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+              <rect x="1" y="3" width="7" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+              <path d="M4 3V2a1 1 0 011-1h5a1 1 0 011 1v7a1 1 0 01-1 1h-1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+            </svg>
+            Copy to all images
+          </button>
           <button className="dm-btn" onClick={()=>setDarkMode(d=>!d)} title={darkMode?"Light mode":"Dark mode"}>
             {darkMode ? "☀️" : "🌙"}
           </button>
@@ -542,7 +614,6 @@ export default function CropKit() {
             </div>
           ) : (
             <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
-              {/* nav */}
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
                 padding:"7px 14px", background:"var(--surface)", borderBottom:"1px solid var(--border)", flexShrink:0, gap:10 }}>
                 <div style={{ fontSize:10, color:"var(--text4)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flex:1 }}>
@@ -558,18 +629,21 @@ export default function CropKit() {
                   <button className="nav-btn" disabled={activeIdx===images.length-1} onClick={()=>setActiveIdx(i=>i+1)}>›</button>
                 </div>
               </div>
-              {/* canvas fill */}
               <div style={{ flex:1, overflow:"hidden", padding:14 }}>
-                <CropCanvas 
-                  key={`${activeIdx}_${activeImage.url}_${sizeKey}`}
-                  imgFile={activeImage} 
-                  aspectW={aspectW} 
+                <CropCanvas
+                  key={`${activeImage.url}_${S.sizeKey}`}
+                  imgFile={activeImage}
+                  aspectW={aspectW}
                   aspectH={aspectH}
-                  desiredCropSize={desiredCropSize}
+                  desiredCropSize={S.desiredCropSize}
+                  savedCrop={crops[activeIdx] || null}
+                  lockRatio={lockRatio}
                   onCropChange={c=>{
                     setCrops(p=>({...p,[activeIdx]:c}));
-                    setPendingW(String(Math.round(c.w)));
-                    setPendingH(String(Math.round(c.h)));
+                    updateSettings(activeIdx, {
+                      pendingW: String(Math.round(c.w)),
+                      pendingH: String(Math.round(c.h)),
+                    });
                   }}
                 />
               </div>
@@ -590,20 +664,38 @@ export default function CropKit() {
           display:"flex", flexDirection:"column", flexShrink:0, overflow:"hidden" }}>
           <div style={{ flex:1, overflowY:"auto", padding:"16px 16px 0", display:"flex", flexDirection:"column", gap:18 }}>
 
+            {images.length > 1 && (
+              <div style={{ background:"rgba(255,51,51,.08)", border:"1px solid rgba(255,51,51,.18)", borderRadius:7,
+                padding:"6px 10px", fontSize:9, color:"var(--text3)", letterSpacing:".05em",
+                display:"flex", alignItems:"center", gap:6 }}>
+                <div style={{ width:5,height:5,borderRadius:"50%",background:"#FF3333",flexShrink:0 }}/>
+                Image {activeIdx+1} of {images.length} · individual settings
+              </div>
+            )}
+
             <div>
               <div className="lbl">Crop ratio shortcut</div>
               <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
                 {PRESETS.map(p => (
-                  <button key={p.label} className={`pill ${preset?.label===p.label?"active":""}`}
+                  <button key={p.label} className={`pill ${S.preset?.label===p.label?"active":""}`}
                     onClick={()=>{
-                      setPreset(p);
-                      const ratio = p.w / p.h;
-                      const h = parseInt(pendingH) || 512;
-                      const newW = String(Math.max(1, Math.round(h * ratio)));
-                      setCustomW(newW); setPendingW(newW);
-                      setCustomH(String(h)); setPendingH(String(h));
-                      setDesiredCropSize(null);
-                      setSizeKey(k=>k+1);
+                      if (S.preset?.label === p.label) {
+                        // Deselect — go back to free crop
+                        updateSettings(activeIdx, { preset: null, desiredCropSize: null, sizeKey: S.sizeKey + 1 });
+                        setCrops(p => { const n = {...p}; delete n[activeIdx]; return n; });
+                      } else {
+                        const ratio = p.w / p.h;
+                        const h = parseInt(S.pendingH) || 512;
+                        const newW = String(Math.max(1, Math.round(h * ratio)));
+                        updateSettings(activeIdx, {
+                          preset: p,
+                          customW: newW, pendingW: newW,
+                          customH: String(h), pendingH: String(h),
+                          desiredCropSize: { w: Math.max(1, Math.round(h * ratio)), h },
+                          sizeKey: S.sizeKey + 1,
+                        });
+                        setCrops(p => { const n = {...p}; delete n[activeIdx]; return n; });
+                      }
                     }}>{p.label}</button>
                 ))}
               </div>
@@ -615,23 +707,28 @@ export default function CropKit() {
             <div>
               <div className="lbl">Output size (px) — updates live</div>
               <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                <input className="inp inp-sm" type="number" min="1" value={pendingW}
-                  onChange={e=>setPendingW(e.target.value)}
-                  onKeyDown={e=>{ if(e.key==="Enter"){ const w=Math.max(1,parseInt(pendingW)||512); const h=Math.max(1,parseInt(pendingH)||512); setPreset(null); setCustomW(String(w)); setCustomH(String(h)); setPendingW(String(w)); setPendingH(String(h)); setDesiredCropSize({w,h}); setSizeKey(k=>k+1); }}}/>
+                <input className="inp inp-sm" type="number" min="1" value={S.pendingW}
+                  onChange={e=>updateSettings(activeIdx,{pendingW:e.target.value})}
+                  onKeyDown={e=>{ if(e.key==="Enter"){
+                    const w=Math.max(1,parseInt(S.pendingW)||512); const h=Math.max(1,parseInt(S.pendingH)||512);
+                    updateSettings(activeIdx,{ preset:null,customW:String(w),customH:String(h),pendingW:String(w),pendingH:String(h),desiredCropSize:{w,h},sizeKey:S.sizeKey+1 });
+                    setCrops(p => { const n = {...p}; delete n[activeIdx]; return n; });
+                  }}}/>
                 <span style={{ color:"var(--text5)",fontSize:14,fontWeight:300 }}>×</span>
-                <input className="inp inp-sm" type="number" min="1" value={pendingH}
-                  onChange={e=>setPendingH(e.target.value)}
-                  onKeyDown={e=>{ if(e.key==="Enter"){ const w=Math.max(1,parseInt(pendingW)||512); const h=Math.max(1,parseInt(pendingH)||512); setPreset(null); setCustomW(String(w)); setCustomH(String(h)); setPendingW(String(w)); setPendingH(String(h)); setDesiredCropSize({w,h}); setSizeKey(k=>k+1); }}}/>
+                <input className="inp inp-sm" type="number" min="1" value={S.pendingH}
+                  onChange={e=>updateSettings(activeIdx,{pendingH:e.target.value})}
+                  onKeyDown={e=>{ if(e.key==="Enter"){
+                    const w=Math.max(1,parseInt(S.pendingW)||512); const h=Math.max(1,parseInt(S.pendingH)||512);
+                    updateSettings(activeIdx,{ preset:null,customW:String(w),customH:String(h),pendingW:String(w),pendingH:String(h),desiredCropSize:{w,h},sizeKey:S.sizeKey+1 });
+                    setCrops(p => { const n = {...p}; delete n[activeIdx]; return n; });
+                  }}}/>
               </div>
               <button className="btn-main" style={{ width:"100%", marginTop:8, padding:"7px 12px", fontSize:11 }}
                 onClick={()=>{
-                  const w = Math.max(1, parseInt(pendingW)||512);
-                  const h = Math.max(1, parseInt(pendingH)||512);
-                  setPreset(null);
-                  setCustomW(String(w)); setCustomH(String(h));
-                  setPendingW(String(w)); setPendingH(String(h));
-                  setDesiredCropSize({ w, h });
-                  setSizeKey(k=>k+1);
+                  const w=Math.max(1,parseInt(S.pendingW)||512); const h=Math.max(1,parseInt(S.pendingH)||512);
+                  updateSettings(activeIdx,{ preset:null,customW:String(w),customH:String(h),pendingW:String(w),pendingH:String(h),desiredCropSize:{w,h},sizeKey:S.sizeKey+1 });
+                  // Clear saved crop so canvas uses the new desiredCropSize, not the old position
+                  setCrops(p => { const n = {...p}; delete n[activeIdx]; return n; });
                 }}>
                 Lock ratio &amp; reset crop
               </button>
@@ -644,13 +741,15 @@ export default function CropKit() {
               <div className="lbl">Format</div>
               <div className="seg">
                 {["jpg","png","webp","avif"].map(ext=>(
-                  <button key={ext} className={outputExt===ext?"active":""} onClick={()=>setOutputExt(ext)}>.{ext}</button>
+                  <button key={ext} className={S.outputExt===ext?"active":""} onClick={()=>updateSettings(activeIdx,{outputExt:ext})}>.{ext}</button>
                 ))}
               </div>
-              {(outputExt==="jpg"||outputExt==="webp") && (
+              {(S.outputExt==="jpg"||S.outputExt==="webp") && (
                 <div style={{ marginTop:10 }}>
-                  <div className="lbl">Quality — {quality}%</div>
-                  <input type="range" min="60" max="100" value={quality} onChange={e=>setQuality(+e.target.value)} style={{ width:"100%",accentColor:"#FF3333" }}/>
+                  <div className="lbl">Quality — {S.quality}%</div>
+                  <input type="range" min="60" max="100" value={S.quality}
+                    onChange={e=>updateSettings(activeIdx,{quality:+e.target.value})}
+                    style={{ width:"100%",accentColor:"#FF3333" }}/>
                 </div>
               )}
             </div>
@@ -687,7 +786,7 @@ export default function CropKit() {
               <button className="btn-main" disabled={images.length===0||processing} onClick={downloadAll}
                 style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
                 {processing ? (progressLabel || "Processing…") : (<>
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                     <path d="M8 1v8.5M8 9.5l-3-3M8 9.5l3-3" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                     <path d="M2 11.5v1A1.5 1.5 0 003.5 14h9a1.5 1.5 0 001.5-1.5v-1" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/>
                   </svg>
@@ -736,6 +835,8 @@ export default function CropKit() {
         <RenameModal count={images.length} initialConfig={renameConfig} onClose={()=>setShowRename(false)}
           onApply={cfg=>{ setRenameConfig(cfg); setShowRename(false); }}/>
       )}
+
+      {toastMsg && <Toast msg={toastMsg} onDone={()=>setToastMsg("")} />}
     </div>
   );
 }
