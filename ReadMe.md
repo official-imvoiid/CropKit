@@ -21,7 +21,7 @@ CropKit is a client-side batch image editor built with React and Vite. It lets y
 
 Every operation happens in the browser using the Canvas API.
 
-![CropKit Screenshot — Dark Mode](ui/screenshot-dark.png)
+![CropKit Screenshot — Dark Mode](https://github.com/official-imvoiid/CropKit/blob/main/ui/Dark_Ui.png)
 
 ---
 
