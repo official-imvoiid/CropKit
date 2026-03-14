@@ -53,7 +53,7 @@ Every operation happens in the browser using the Canvas API.
 - Mono/geometric design system — DM Mono + Syne typefaces
 - Fully keyboard-navigable size inputs (Enter to commit)
 
-![CropKit Screenshot — Settings Panel](ui/screenshot-panel.png)
+![CropKit Screenshot — Settings Panel](https://github.com/official-imvoiid/CropKit/blob/main/ui/Selection_Option.png)
 
 ---
 
